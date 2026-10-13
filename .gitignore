@@ -218,3 +218,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local Docs RAG data and machine-specific files
+.DS_Store
+*.sqlite3
+*.sqlite3-*
+tests/evaluation/questions.jsonl
+tests/evaluation/results.json

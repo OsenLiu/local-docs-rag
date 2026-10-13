@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=69.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "local-docs-rag"
+version = "0.1.0"
+description = "Local hybrid search and question answering for personal documents"
+requires-python = ">=3.11"
+dependencies = [
+    "keyring",
+    "markdown-it-py",
+    "mcp>=1,<2",
+    "openai",
+    "pypdf",
+    "sqlite-vec",
+    "tiktoken",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+local-docs-rag = "local_docs_rag.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
