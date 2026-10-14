@@ -26,6 +26,21 @@ def test_indexer_indexes_markdown_and_ignores_other_file_types(tmp_path: Path) -
     assert len(provider.embedded_texts) == 1
 
 
+def test_indexer_ignores_mac_appledouble_files(tmp_path: Path) -> None:
+    source_dir = tmp_path / "documents"
+    source_dir.mkdir()
+    (source_dir / "._guide.pdf").write_bytes(b"\x00\x05\x16\x07\x00")
+    (source_dir / "guide.md").write_text("# Guide\n\nUse the guide.\n", encoding="utf-8")
+    store = IndexStore(tmp_path / "index.sqlite3", embedding_dimensions=4)
+    provider = EmbeddingProvider.create_null(dimensions=4)
+
+    report = Indexer(source_dir, store, provider).run()
+
+    assert report.added == 1
+    assert report.failed == 0
+    assert report.issues == []
+
+
 def test_indexer_skips_unchanged_files_and_replaces_modified_content(tmp_path: Path) -> None:
     source_dir = tmp_path / "documents"
     source_dir.mkdir()

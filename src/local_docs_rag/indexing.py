@@ -38,7 +38,9 @@ class Indexer:
         files = sorted(
             path
             for path in self.source_dir.rglob("*")
-            if path.is_file() and path.suffix.lower() in {".pdf", ".md"}
+            if path.is_file()
+            and not path.name.startswith("._")
+            and path.suffix.lower() in {".pdf", ".md"}
         )
         discovered_sources = {str(path.resolve()) for path in files}
 
