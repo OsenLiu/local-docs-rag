@@ -102,6 +102,25 @@ copilot mcp add local-docs-rag -- "$HOME/Projects/local-docs-rag/.venv/bin/pytho
 
 Both clients start the same stdio server and use the same local index and Keychain credential. In Copilot CLI, `/mcp` shows the registered tools.
 
+### Install the Copilot plugin
+
+The plugin searches the local index by invoking the `local-docs-rag` CLI directly; it does not start or configure an MCP server. Install the CLI from this checkout so it is available in every terminal:
+
+```bash
+pipx install --editable "$PWD"
+pipx ensurepath
+```
+
+Restart your terminal if `pipx ensurepath` changed `PATH`. After the plugin changes have been pushed to GitHub, install the plugin from the repository:
+
+```bash
+copilot plugin install OsenLiu/local-docs-rag
+```
+
+The plugin is installed for future Copilot CLI sessions. Confirm it is listed with `copilot plugin list`; then start a new session and ask about your local documents or invoke `/local-docs-rag`. The skill runs `local-docs-rag search` and asks Copilot to answer from the returned passages with source paths and locators. Update the plugin with `copilot plugin update local-docs-rag`.
+
+To try the plugin from an unpublished local checkout instead, run `copilot --plugin-dir "$PWD"` from the repository root. This loads it for that session only. The manual MCP setup above remains available separately for MCP clients.
+
 ## Data Handling
 
 - Original files are read in place and are not copied into the index directory.
