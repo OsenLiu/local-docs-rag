@@ -3,10 +3,10 @@ import getpass
 import json
 import sys
 from collections.abc import Sequence
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
-from local_docs_rag.config import DEFAULT_CONFIG_PATH, Settings
+from local_docs_rag.config import DEFAULT_CONFIG_PATH, Settings, validate_project_name
 from local_docs_rag.credentials import CredentialStore
 from local_docs_rag.evaluation import RetrievalQuestion, evaluate_retrieval
 from local_docs_rag.indexing import Indexer
@@ -28,7 +28,7 @@ def _setup(config_path: Path, use_defaults: bool = False) -> int:
         print(f"Settings saved to {config_path.expanduser()}")
         return 0
 
-    source_dir_value = _prompt_value("Document directory", str(current.source_dir))
+    source_dir_value = _prompt_value("Legacy document directory for index adoption", str(current.source_dir))
     database_path_value = _prompt_value("Index database", str(current.database_path))
     base_url = _prompt_value("OpenAI-compatible API base URL", current.base_url)
     embedding_model = _prompt_value("Embedding model", current.embedding_model)
@@ -49,6 +49,7 @@ def _setup(config_path: Path, use_defaults: bool = False) -> int:
         embedding_model=embedding_model,
         embedding_dimensions=dimensions,
         answer_model=answer_model,
+        projects=current.projects,
     )
     settings.save(config_path)
     print(f"Settings saved to {config_path.expanduser()}")
@@ -70,10 +71,24 @@ def _create_embedding_provider(settings: Settings) -> EmbeddingProvider | None:
     return EmbeddingProvider.create(settings)
 
 
-def _index(config_path: Path) -> int:
+def _load_project(config_path: Path, project: str) -> tuple[Settings, Path]:
+    validate_project_name(project)
     settings = Settings.load(config_path=config_path)
+    source_dir = settings.projects.get(project)
+    if source_dir is None:
+        raise ValueError(f"unknown project {project!r}; register it with 'local-docs-rag project add'")
+    return settings, source_dir
+
+
+def _index(config_path: Path, project: str) -> int:
+    settings, source_dir = _load_project(config_path, project)
     store = IndexStore(settings.database_path, settings.embedding_dimensions)
-    report = Indexer(settings.source_dir, store, _create_embedding_provider(settings)).run()
+    report = Indexer(
+        source_dir,
+        store,
+        _create_embedding_provider(settings),
+        project=project,
+    ).run()
     print(
         f"Index complete: added={report.added} updated={report.updated} "
         f"unchanged={report.unchanged} removed={report.removed} failed={report.failed}"
@@ -83,11 +98,11 @@ def _index(config_path: Path) -> int:
     return 0 if report.failed == 0 else 1
 
 
-def _search(config_path: Path, query: str, limit: int) -> int:
-    settings = Settings.load(config_path=config_path)
+def _search(config_path: Path, project: str, query: str, limit: int) -> int:
+    settings, _ = _load_project(config_path, project)
     store = IndexStore(settings.database_path, settings.embedding_dimensions)
     search_service = SearchService(store, _create_embedding_provider(settings))
-    results = search_service.search(query, limit)
+    results = search_service.search(query, limit, project=project)
     if not results:
         print("No matching documents.")
         return 0
@@ -97,7 +112,12 @@ def _search(config_path: Path, query: str, limit: int) -> int:
     return 0
 
 
-def _evaluate(config_path: Path, questions_path: Path, output_path: Path) -> int:
+def _evaluate(
+    config_path: Path,
+    project: str,
+    questions_path: Path,
+    output_path: Path | None,
+) -> int:
     questions: list[RetrievalQuestion] = []
     for line_number, line in enumerate(questions_path.read_text(encoding="utf-8").splitlines(), start=1):
         if not line.strip():
@@ -115,25 +135,31 @@ def _evaluate(config_path: Path, questions_path: Path, output_path: Path) -> int
         except (json.JSONDecodeError, KeyError, TypeError) as error:
             raise ValueError(f"invalid evaluation question on line {line_number}") from error
 
-    settings = Settings.load(config_path=config_path)
+    settings, source_dir = _load_project(config_path, project)
     store = IndexStore(settings.database_path, settings.embedding_dimensions)
     search_service = SearchService(store, _create_embedding_provider(settings))
-    metrics = evaluate_retrieval(questions, search_service.search, settings.source_dir)
+    metrics = evaluate_retrieval(
+        questions,
+        lambda query, limit: search_service.search(query, limit, project=project),
+        source_dir,
+    )
     serialized_metrics = json.dumps(asdict(metrics), indent=2) + "\n"
+    if output_path is None:
+        output_path = Path(__file__).resolve().parents[2] / "tests/evaluation" / f"results-{project}.json"
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(serialized_metrics, encoding="utf-8")
     print(serialized_metrics, end="")
     return 0
 
 
-def _ask(config_path: Path, query: str, limit: int) -> int:
-    settings = Settings.load(config_path=config_path)
+def _ask(config_path: Path, project: str, query: str, limit: int) -> int:
+    settings, _ = _load_project(config_path, project)
     store = IndexStore(settings.database_path, settings.embedding_dimensions)
     search_service = SearchService(store, _create_embedding_provider(settings))
     answer_provider = AnswerProvider.create(settings)
-    answer = RagService(search_service, answer_provider).answer(query, limit)
+    answer = RagService(search_service, answer_provider).answer(query, limit, project=project)
     print(answer.answer)
-    for chunk in store.get_chunks(answer.citations):
+    for chunk in store.get_chunks(answer.citations, project=project):
         print(f"Source: {chunk.source}#{chunk.locator}")
     return 0
 
@@ -142,6 +168,63 @@ def _mcp_serve(config_path: Path) -> int:
     from local_docs_rag.mcp_server import serve
 
     serve(config_path)
+    return 0
+
+
+def _project_add(config_path: Path, name: str, source_dir: Path, adopt_existing: bool) -> int:
+    validate_project_name(name)
+    settings = Settings.load(config_path=config_path)
+    if name in settings.projects:
+        raise ValueError(f"project {name!r} is already registered")
+    resolved_source_dir = source_dir.expanduser().resolve()
+    if not resolved_source_dir.is_dir():
+        raise FileNotFoundError(f"project source directory does not exist: {resolved_source_dir}")
+    if adopt_existing:
+        if resolved_source_dir != settings.source_dir.expanduser().resolve():
+            raise ValueError(
+                "--adopt-existing requires SOURCE_DIR to match the configured legacy source_dir "
+                f"({settings.source_dir.expanduser().resolve()})"
+            )
+        if not settings.database_path.expanduser().is_file():
+            raise ValueError("there is no existing index database to adopt")
+        store = IndexStore(settings.database_path, settings.embedding_dimensions)
+        store.adopt_legacy_documents(name)
+    projects = dict(settings.projects)
+    projects[name] = resolved_source_dir
+    replace(settings, projects=projects).save(config_path)
+    print(f"Project registered: {name} -> {resolved_source_dir}")
+    return 0
+
+
+def _project_list(config_path: Path) -> int:
+    settings = Settings.load(config_path=config_path)
+    if not settings.projects:
+        print("No projects registered.")
+        return 0
+    for name, source_dir in sorted(settings.projects.items()):
+        print(f"{name}\t{source_dir}")
+    return 0
+
+
+def _project_remove(config_path: Path, name: str, assume_yes: bool) -> int:
+    validate_project_name(name)
+    settings = Settings.load(config_path=config_path)
+    if name not in settings.projects:
+        raise ValueError(f"unknown project {name!r}")
+    if not assume_yes:
+        if not sys.stdin.isatty():
+            raise ValueError("project removal requires confirmation; pass --yes in non-interactive mode")
+        confirmation = input(f"Remove project {name!r} and its indexed data? [y/N] ")
+        if confirmation.strip().casefold() not in {"y", "yes"}:
+            print("Project removal cancelled.")
+            return 0
+    database_path = settings.database_path.expanduser()
+    if database_path.is_file():
+        IndexStore(database_path, settings.embedding_dimensions).remove_project(name)
+    projects = dict(settings.projects)
+    del projects[name]
+    replace(settings, projects=projects).save(config_path)
+    print(f"Project removed: {name}")
     return 0
 
 
@@ -159,28 +242,69 @@ def build_parser() -> argparse.ArgumentParser:
     set_parser = credential_commands.add_parser("set", help="save the model API key")
     set_parser.set_defaults(handler=lambda args: _set_credentials(CredentialStore.create()))
 
+    project_parser = commands.add_parser("project", help="manage indexed document projects")
+    project_commands = project_parser.add_subparsers(dest="project_command", required=True)
+    project_add_parser = project_commands.add_parser("add", help="register a document project")
+    project_add_parser.add_argument("name")
+    project_add_parser.add_argument("source_dir", type=Path)
+    project_add_parser.add_argument("--adopt-existing", action="store_true")
+    project_add_parser.add_argument("--config-path", type=Path, default=DEFAULT_CONFIG_PATH)
+    project_add_parser.set_defaults(
+        handler=lambda args: _project_add(
+            args.config_path,
+            args.name,
+            args.source_dir,
+            args.adopt_existing,
+        )
+    )
+
+    project_list_parser = project_commands.add_parser("list", help="list registered projects")
+    project_list_parser.add_argument("--config-path", type=Path, default=DEFAULT_CONFIG_PATH)
+    project_list_parser.set_defaults(handler=lambda args: _project_list(args.config_path))
+
+    project_remove_parser = project_commands.add_parser("remove", help="remove a project and its indexed data")
+    project_remove_parser.add_argument("name")
+    project_remove_parser.add_argument("--yes", action="store_true", help="confirm removal without prompting")
+    project_remove_parser.add_argument("--config-path", type=Path, default=DEFAULT_CONFIG_PATH)
+    project_remove_parser.set_defaults(
+        handler=lambda args: _project_remove(args.config_path, args.name, args.yes)
+    )
+
     index_parser = commands.add_parser("index", help="index PDF and Markdown files")
+    index_parser.add_argument("project")
     index_parser.add_argument("--config-path", type=Path, default=DEFAULT_CONFIG_PATH)
-    index_parser.set_defaults(handler=lambda args: _index(args.config_path))
+    index_parser.set_defaults(handler=lambda args: _index(args.config_path, args.project))
 
     search_parser = commands.add_parser("search", help="search indexed documents")
+    search_parser.add_argument("project")
     search_parser.add_argument("query")
     search_parser.add_argument("--limit", type=int, default=8)
     search_parser.add_argument("--config-path", type=Path, default=DEFAULT_CONFIG_PATH)
-    search_parser.set_defaults(handler=lambda args: _search(args.config_path, args.query, args.limit))
+    search_parser.set_defaults(
+        handler=lambda args: _search(args.config_path, args.project, args.query, args.limit)
+    )
 
     project_root = Path(__file__).resolve().parents[2]
     evaluate_parser = commands.add_parser("evaluate", help="measure retrieval against local evaluation questions")
+    evaluate_parser.add_argument("project")
     evaluate_parser.add_argument("--questions-path", type=Path, default=project_root / "tests/evaluation/questions.jsonl")
-    evaluate_parser.add_argument("--output-path", type=Path, default=project_root / "tests/evaluation/results.json")
+    evaluate_parser.add_argument("--output-path", type=Path)
     evaluate_parser.add_argument("--config-path", type=Path, default=DEFAULT_CONFIG_PATH)
-    evaluate_parser.set_defaults(handler=lambda args: _evaluate(args.config_path, args.questions_path, args.output_path))
+    evaluate_parser.set_defaults(
+        handler=lambda args: _evaluate(
+            args.config_path,
+            args.project,
+            args.questions_path,
+            args.output_path,
+        )
+    )
 
     ask_parser = commands.add_parser("ask", help="answer a question with document citations")
+    ask_parser.add_argument("project")
     ask_parser.add_argument("query")
     ask_parser.add_argument("--limit", type=int, default=8)
     ask_parser.add_argument("--config-path", type=Path, default=DEFAULT_CONFIG_PATH)
-    ask_parser.set_defaults(handler=lambda args: _ask(args.config_path, args.query, args.limit))
+    ask_parser.set_defaults(handler=lambda args: _ask(args.config_path, args.project, args.query, args.limit))
 
     mcp_parser = commands.add_parser("mcp", help="run the MCP server")
     mcp_commands = mcp_parser.add_subparsers(dest="mcp_command", required=True)

@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from local_docs_rag.chunking import chunk_sections
+from local_docs_rag.config import DEFAULT_PROJECT
 from local_docs_rag.parsing import parse_markdown, parse_pdf
 from local_docs_rag.providers import EmbeddingProvider
 from local_docs_rag.store import IndexStore
@@ -24,9 +25,12 @@ class Indexer:
         source_dir: Path,
         store: IndexStore,
         embedding_provider: EmbeddingProvider | None = None,
+        *,
+        project: str = DEFAULT_PROJECT,
     ) -> None:
         self.source_dir = source_dir.expanduser().resolve()
         self.store = store
+        self.project = project
         self.embedding_provider = embedding_provider
 
     def run(self) -> IndexReport:
@@ -34,7 +38,7 @@ class Indexer:
             raise FileNotFoundError(f"document directory does not exist: {self.source_dir}")
 
         report = IndexReport()
-        existing_hashes = self.store.document_hashes()
+        existing_hashes = self.store.document_hashes(project=self.project)
         files = sorted(
             path
             for path in self.source_dir.rglob("*")
@@ -45,7 +49,7 @@ class Indexer:
         discovered_sources = {str(path.resolve()) for path in files}
 
         for source in existing_hashes.keys() - discovered_sources:
-            self.store.remove_document(source)
+            self.store.remove_document(source, project=self.project)
             report.removed += 1
 
         for path in files:
@@ -57,13 +61,19 @@ class Indexer:
 
             try:
                 sections = parse_pdf(path) if path.suffix.lower() == ".pdf" else parse_markdown(path)
-                chunks = chunk_sections(source, sections, document_hash)
+                chunks = chunk_sections(source, sections, document_hash, self.project)
                 if not chunks:
                     raise ValueError("no text could be extracted from document")
                 embeddings = None
                 if self.embedding_provider is not None:
                     embeddings = self.embedding_provider.embed([chunk.text for chunk in chunks])
-                self.store.upsert_document(source, document_hash, chunks, embeddings)
+                self.store.upsert_document(
+                    source,
+                    document_hash,
+                    chunks,
+                    embeddings,
+                    project=self.project,
+                )
             except Exception as error:
                 report.failed += 1
                 report.issues.append(f"{source}: {error}")

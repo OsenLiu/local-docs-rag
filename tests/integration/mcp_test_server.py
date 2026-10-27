@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+from pathlib import Path
 
 from local_docs_rag.models import DocumentChunk
 from local_docs_rag.providers import AnswerProvider
@@ -20,4 +21,4 @@ chunk = DocumentChunk(
 store.upsert_document("manual.md", "test-hash", [chunk])
 search_service = SearchService(store)
 rag_service = RagService(search_service, AnswerProvider.create_null())
-create_server(store, search_service, rag_service).run(transport="stdio")
+create_server(store, search_service, rag_service, {"default": Path.cwd()}).run(transport="stdio")

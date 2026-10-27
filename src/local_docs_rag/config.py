@@ -1,6 +1,7 @@
 import json
 import os
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping
 
@@ -8,6 +9,14 @@ from typing import Mapping
 DEFAULT_SOURCE_DIR = Path.home() / "Downloads/doc"
 DEFAULT_DATABASE_PATH = Path.home() / "Library/Application Support/local-docs-rag/index.sqlite3"
 DEFAULT_CONFIG_PATH = Path.home() / "Library/Application Support/local-docs-rag/config.json"
+DEFAULT_PROJECT = "default"
+_PROJECT_NAME_PATTERN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
+
+
+def validate_project_name(name: str) -> str:
+    if not _PROJECT_NAME_PATTERN.fullmatch(name):
+        raise ValueError("project name must be a lowercase slug using letters, numbers, and hyphens")
+    return name
 
 
 @dataclass(frozen=True)
@@ -18,6 +27,7 @@ class Settings:
     embedding_model: str | None
     embedding_dimensions: int | None
     answer_model: str | None
+    projects: dict[str, Path] = field(default_factory=dict)
 
     def save(self, config_path: Path | None = None) -> None:
         path = DEFAULT_CONFIG_PATH if config_path is None else config_path.expanduser()
@@ -29,6 +39,7 @@ class Settings:
             "embedding_model": self.embedding_model,
             "embedding_dimensions": self.embedding_dimensions,
             "answer_model": self.answer_model,
+            "projects": {name: str(source_dir) for name, source_dir in self.projects.items()},
         }
         path.write_text(json.dumps(values, indent=2) + "\n", encoding="utf-8")
 
@@ -48,6 +59,17 @@ class Settings:
         embedding_dimensions = None if dimensions_value in (None, "") else int(dimensions_value)
         if embedding_dimensions is not None and embedding_dimensions <= 0:
             raise ValueError("embedding dimensions must be a positive integer")
+        raw_projects = values.get("projects", {})
+        if not isinstance(raw_projects, dict):
+            raise ValueError("projects setting must be an object mapping project names to source directories")
+        projects: dict[str, Path] = {}
+        for name, project_source_dir in raw_projects.items():
+            validate_project_name(name)
+            if not isinstance(project_source_dir, str):
+                raise ValueError(f"source directory for project {name!r} must be a string")
+            if name.casefold() in {existing.casefold() for existing in projects}:
+                raise ValueError(f"duplicate project name: {name}")
+            projects[name] = Path(project_source_dir).expanduser()
 
         return cls(
             source_dir=Path(source_dir).expanduser(),
@@ -56,4 +78,5 @@ class Settings:
             embedding_model=env.get("RAG_EMBEDDING_MODEL", values.get("embedding_model")),
             embedding_dimensions=embedding_dimensions,
             answer_model=env.get("RAG_ANSWER_MODEL", values.get("answer_model")),
+            projects=projects,
         )

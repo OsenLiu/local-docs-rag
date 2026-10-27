@@ -225,3 +225,4 @@ __marimo__/
 *.sqlite3-*
 tests/evaluation/questions.jsonl
 tests/evaluation/results.json
+tests/evaluation/results-*.json

@@ -1,3 +1,4 @@
+import sqlite3
 from pathlib import Path
 
 from local_docs_rag.models import DocumentChunk
@@ -74,3 +75,61 @@ def test_get_chunks_preserves_requested_order_and_omits_unknown_ids(tmp_path: Pa
 
     assert [chunk.id for chunk in chunks] == ["second", "first"]
     assert [chunk.locator for chunk in chunks] == ["Guide", "Guide"]
+
+
+def test_store_isolates_shared_source_across_projects(tmp_path: Path) -> None:
+    store = IndexStore(tmp_path / "index.sqlite3", embedding_dimensions=2)
+    alpha_chunk = make_chunk("alpha-chunk", "guide.md", "alpha network instructions")
+    beta_chunk = make_chunk("beta-chunk", "guide.md", "beta network instructions")
+    store.upsert_document("guide.md", "alpha-hash", [alpha_chunk], [[0.0, 1.0]], project="alpha")
+    store.upsert_document("guide.md", "beta-hash", [beta_chunk], [[1.0, 0.0]], project="beta")
+
+    assert [result.chunk.id for result in store.search_keyword("network", 5, project="alpha")] == ["alpha-chunk"]
+    assert [result.chunk.id for result in store.search_keyword("network", 5, project="beta")] == ["beta-chunk"]
+    assert [result.chunk.id for result in store.search_vector([1.0, 0.0], 1, project="alpha")] == ["alpha-chunk"]
+    assert [chunk.id for chunk in store.get_chunks(["beta-chunk", "alpha-chunk"], project="alpha")] == ["alpha-chunk"]
+    assert store.document_hashes(project="alpha") == {"guide.md": "alpha-hash"}
+
+    store.remove_document("guide.md", project="alpha")
+
+    assert store.search_keyword("alpha", 5, project="alpha") == []
+    assert [result.chunk.id for result in store.search_keyword("beta", 5, project="beta")] == ["beta-chunk"]
+
+
+def test_store_adopts_legacy_index_under_one_project(tmp_path: Path) -> None:
+    database_path = tmp_path / "legacy.sqlite3"
+    source = str(tmp_path / "guide.md")
+    connection = sqlite3.connect(database_path)
+    connection.executescript(
+        """CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+           CREATE TABLE documents (source TEXT PRIMARY KEY, document_hash TEXT NOT NULL);
+           CREATE TABLE chunks (
+               vector_id INTEGER PRIMARY KEY AUTOINCREMENT,
+               id TEXT NOT NULL UNIQUE,
+               source TEXT NOT NULL REFERENCES documents(source) ON DELETE CASCADE,
+               locator TEXT NOT NULL,
+               text TEXT NOT NULL,
+               document_hash TEXT NOT NULL
+           );
+           CREATE VIRTUAL TABLE chunks_fts USING fts5(
+               chunk_id UNINDEXED, source UNINDEXED, locator UNINDEXED, text
+           );"""
+    )
+    connection.execute("INSERT INTO documents(source, document_hash) VALUES (?, ?)", (source, "legacy-hash"))
+    connection.execute(
+        "INSERT INTO chunks(id, source, locator, text, document_hash) VALUES (?, ?, ?, ?, ?)",
+        ("legacy-chunk", source, "Guide", "legacy project material", "legacy-hash"),
+    )
+    connection.execute(
+        "INSERT INTO chunks_fts(chunk_id, source, locator, text) VALUES (?, ?, ?, ?)",
+        ("legacy-chunk", source, "Guide", "legacy project material"),
+    )
+    connection.commit()
+    connection.close()
+
+    store = IndexStore(database_path)
+    assert store.adopt_legacy_documents("alpha") == 1
+    assert store.document_hashes(project="alpha") == {source: "legacy-hash"}
+    assert [result.chunk.id for result in store.search_keyword("legacy", 5, project="alpha")] == [
+        "legacy-chunk"
+    ]

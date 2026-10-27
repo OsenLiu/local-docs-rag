@@ -10,6 +10,7 @@ def chunk_sections(
     source: str,
     sections: Sequence[tuple[str, str]],
     document_hash: str,
+    project: str = "",
     max_tokens: int = 600,
     overlap_tokens: int = 80,
 ) -> list[DocumentChunk]:
@@ -30,7 +31,7 @@ def chunk_sections(
             if not text.strip():
                 continue
             chunk_id = hashlib.sha256(
-                f"{source}\0{locator}\0{section_index}\0{chunk_index}\0{text}".encode("utf-8")
+                f"{project}\0{source}\0{locator}\0{section_index}\0{chunk_index}\0{text}".encode("utf-8")
             ).hexdigest()
             chunks.append(
                 DocumentChunk(

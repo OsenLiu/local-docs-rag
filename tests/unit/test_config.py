@@ -75,6 +75,7 @@ def test_save_persists_non_secret_settings_and_can_be_loaded(tmp_path: Path) -> 
         embedding_model="embedding-model",
         embedding_dimensions=1536,
         answer_model="answer-model",
+        projects={"team-docs": Path("/tmp/team-docs")},
     )
 
     expected.save(config_path)
@@ -82,3 +83,11 @@ def test_save_persists_non_secret_settings_and_can_be_loaded(tmp_path: Path) -> 
 
     assert actual == expected
     assert "api_key" not in config_path.read_text(encoding="utf-8")
+
+
+def test_load_rejects_invalid_project_names(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({"projects": {"Team Docs": str(tmp_path)}}), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="lowercase slug"):
+        Settings.load(environ={}, config_path=config_path)

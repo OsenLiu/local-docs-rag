@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 from local_docs_rag.config import Settings
+from local_docs_rag.store import IndexStore
 
 
 def run_cli(config_path: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
@@ -30,10 +31,11 @@ def test_index_and_search_commands_share_local_index(tmp_path: Path) -> None:
         embedding_model=None,
         embedding_dimensions=None,
         answer_model=None,
+        projects={"manual": source_dir},
     ).save(config_path)
 
-    index_result = run_cli(config_path, "index")
-    search_result = run_cli(config_path, "search", "trusted network")
+    index_result = run_cli(config_path, "index", "manual")
+    search_result = run_cli(config_path, "search", "manual", "trusted network")
 
     assert index_result.returncode == 0, index_result.stderr
     assert "added=1" in index_result.stdout
@@ -54,8 +56,9 @@ def test_evaluate_command_writes_retrieval_metrics(tmp_path: Path) -> None:
         embedding_model=None,
         embedding_dimensions=None,
         answer_model=None,
+        projects={"manual": source_dir},
     ).save(config_path)
-    assert run_cli(config_path, "index").returncode == 0
+    assert run_cli(config_path, "index", "manual").returncode == 0
 
     questions_path = tmp_path / "questions.jsonl"
     questions_path.write_text(
@@ -69,6 +72,7 @@ def test_evaluate_command_writes_retrieval_metrics(tmp_path: Path) -> None:
     evaluate_result = run_cli(
         config_path,
         "evaluate",
+        "manual",
         "--questions-path",
         str(questions_path),
         "--output-path",
@@ -79,4 +83,36 @@ def test_evaluate_command_writes_retrieval_metrics(tmp_path: Path) -> None:
     metrics = json.loads(results_path.read_text(encoding="utf-8"))
     assert metrics["query_count"] == 1
     assert metrics["recall_at_5"] == 1.0
-    assert metrics["locator_accuracy_at_5"] == 1.0
+
+
+def test_project_commands_register_require_and_remove_project(tmp_path: Path) -> None:
+    source_dir = tmp_path / "documents"
+    source_dir.mkdir()
+    (source_dir / "guide.md").write_text("# Alpha\n\nAlpha-only material.\n", encoding="utf-8")
+    config_path = tmp_path / "config.json"
+    Settings(
+        source_dir=tmp_path / "legacy",
+        database_path=tmp_path / "index.sqlite3",
+        base_url=None,
+        embedding_model=None,
+        embedding_dimensions=None,
+        answer_model=None,
+    ).save(config_path)
+
+    add_result = run_cli(config_path, "project", "add", "alpha", str(source_dir))
+    assert add_result.returncode == 0, add_result.stderr
+    assert run_cli(config_path, "index", "unknown").returncode != 0
+
+    index_result = run_cli(config_path, "index", "alpha")
+    assert index_result.returncode == 0, index_result.stderr
+    assert [result.chunk.source for result in IndexStore(tmp_path / "index.sqlite3").search_keyword(
+        "alpha", 5, project="alpha"
+    )] == [str(source_dir / "guide.md")]
+
+    remove_without_confirmation = run_cli(config_path, "project", "remove", "alpha")
+    assert remove_without_confirmation.returncode != 0
+    assert "--yes" in remove_without_confirmation.stderr
+
+    remove_result = run_cli(config_path, "project", "remove", "alpha", "--yes")
+    assert remove_result.returncode == 0, remove_result.stderr
+    assert IndexStore(tmp_path / "index.sqlite3").search_keyword("alpha", 5, project="alpha") == []

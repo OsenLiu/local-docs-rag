@@ -29,8 +29,14 @@ def test_stdio_server_exposes_search_and_cited_answer(tmp_path: Path) -> None:
         async with stdio_client(parameters) as (read_stream, write_stream):
             async with ClientSession(read_stream, write_stream) as session:
                 await session.initialize()
-                search_result = await session.call_tool("search_documents", {"query": "reset button"})
-                answer_result = await session.call_tool("answer_documents", {"query": "How long is reset?"})
+                search_result = await session.call_tool(
+                    "search_documents",
+                    {"project": "default", "query": "reset button"},
+                )
+                answer_result = await session.call_tool(
+                    "answer_documents",
+                    {"project": "default", "query": "How long is reset?"},
+                )
                 return payload_from_result(search_result), payload_from_result(answer_result)
 
     search_payload, answer_payload = asyncio.run(call_tools())

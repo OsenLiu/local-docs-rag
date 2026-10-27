@@ -2,6 +2,7 @@ import json
 from collections import defaultdict
 
 from local_docs_rag.models import Answer, SearchResult
+from local_docs_rag.config import DEFAULT_PROJECT
 from local_docs_rag.providers import AnswerProvider, EmbeddingProvider
 from local_docs_rag.store import IndexStore
 
@@ -11,15 +12,21 @@ class SearchService:
         self._store = store
         self._embedding_provider = embedding_provider
 
-    def search(self, query: str, limit: int = 8) -> list[SearchResult]:
+    def search(
+        self,
+        query: str,
+        limit: int = 8,
+        *,
+        project: str = DEFAULT_PROJECT,
+    ) -> list[SearchResult]:
         if limit <= 0 or not query.strip():
             return []
-        keyword_results = self._store.search_keyword(query, limit)
+        keyword_results = self._store.search_keyword(query, limit, project=project)
         vector_results: list[SearchResult] = []
         if self._embedding_provider is not None and self._store.embedding_dimensions is not None:
             query_vectors = self._embedding_provider.embed([query])
             if query_vectors:
-                vector_results = self._store.search_vector(query_vectors[0], limit)
+                vector_results = self._store.search_vector(query_vectors[0], limit, project=project)
         return self._reciprocal_rank_fusion([keyword_results, vector_results], limit)
 
     @staticmethod
@@ -46,8 +53,14 @@ class RagService:
         self._search_service = search_service
         self._answer_provider = answer_provider
 
-    def answer(self, query: str, limit: int = 8) -> Answer:
-        evidence = self._search_service.search(query, limit)
+    def answer(
+        self,
+        query: str,
+        limit: int = 8,
+        *,
+        project: str = DEFAULT_PROJECT,
+    ) -> Answer:
+        evidence = self._search_service.search(query, limit, project=project)
         if not evidence:
             return Answer(self._ABSTAIN_MESSAGE, [], True)
 
