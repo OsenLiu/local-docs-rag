@@ -29,4 +29,6 @@ ask which project to search; do not silently choose a project.
 
 Use `search`, not `ask`: Copilot should synthesize the retrieved passages and
 citations. Do not run `index PROJECT` unless the user asks to refresh that
-project's document index.
+project's document index. When requested, run it from the directory the user
+wants to refresh; it synchronizes that directory without removing other
+directories indexed under the same project.

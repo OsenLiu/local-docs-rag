@@ -185,6 +185,34 @@ class IndexStore:
             for row in sources:
                 self._delete_source(connection, row["source"])
 
+    def remove_project_source_root(
+        self,
+        project: str,
+        source_root: Path,
+        remaining_roots: Sequence[Path] = (),
+    ) -> int:
+        root = source_root.expanduser().resolve()
+        other_roots = tuple(source.expanduser().resolve() for source in remaining_roots)
+        with closing(self._connect()) as connection, connection:
+            documents = connection.execute(
+                "SELECT source, source_path FROM documents WHERE project = ?",
+                (project,),
+            ).fetchall()
+            source_keys = [
+                row["source"]
+                for row in documents
+                if (
+                    (source_path := Path(row["source_path"]).resolve()).is_relative_to(root)
+                    and not (
+                        source_path.is_file()
+                        and any(source_path.is_relative_to(other_root) for other_root in other_roots)
+                    )
+                )
+            ]
+            for source_key in source_keys:
+                self._delete_source(connection, source_key)
+            return len(source_keys)
+
     def adopt_legacy_documents(self, project: str) -> int:
         with closing(self._connect()) as connection, connection:
             conflicts = connection.execute(

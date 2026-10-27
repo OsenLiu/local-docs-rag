@@ -32,38 +32,50 @@ When embedding settings are absent, indexing and searching use FTS5 only. Config
 
 ### Projects
 
-Register each project with a lowercase slug and one source directory. Projects
-share the configured SQLite database, with every index, search, answer, and
-evaluation operation scoped to its explicit project:
+Register each project with a lowercase slug. A project can contain indexes from
+many directories; projects share the configured SQLite database, with every
+index, search, answer, and evaluation operation scoped to its explicit project:
 
 ```bash
-.venv/bin/local-docs-rag project add team-docs ~/Projects/team/docs
+.venv/bin/local-docs-rag project add team-docs
 .venv/bin/local-docs-rag project list
 ```
+
+Run `local-docs-rag index team-docs` from each directory whose documents should
+belong to `team-docs`. The first index from a directory registers it. Re-indexing
+from that same directory synchronizes its files, including removing indexed
+files deleted there, while retaining indexes from other directories in the
+project. Use `project remove-dir team-docs DIRECTORY --yes` to remove one
+directory and its index; `project remove team-docs --yes` removes the entire
+project and its index.
 
 The project registry is stored in the global settings file. Embedding and answer
 model settings are shared across projects. Project labels prevent accidental
 cross-project mixing; they are not an access-control boundary against another
 user who can access the local database. To preserve an existing unlabelled index,
-use `project add NAME SOURCE_DIR --adopt-existing`; the source directory must
-match the legacy `RAG_SOURCE_DIR`/configured source directory. Project removal
-deletes that project's indexed data after confirmation, but never deletes source
-files.
+use `project add NAME --adopt-existing`; the legacy configured source directory
+is attached to the project. Project and directory removal require confirmation
+and never delete source files.
 
 ## Use From The Terminal
 
 ```bash
-.venv/bin/local-docs-rag index team-docs
-.venv/bin/local-docs-rag search team-docs "trusted network setup"
-.venv/bin/local-docs-rag ask team-docs "How do I reset the device?"
-.venv/bin/local-docs-rag evaluate team-docs
+# Run index from each source directory to include it in the project.
+cd ~/Projects/team/docs
+~/Projects/local-docs-rag/.venv/bin/local-docs-rag index team-docs
+
+# These data commands require a project name and can run from any directory.
+~/Projects/local-docs-rag/.venv/bin/local-docs-rag search team-docs "trusted network setup"
+~/Projects/local-docs-rag/.venv/bin/local-docs-rag ask team-docs "How do I reset the device?"
+~/Projects/local-docs-rag/.venv/bin/local-docs-rag evaluate team-docs
 ```
 
-`index PROJECT` processes only that project's configured source directory. It
-accepts only `.pdf` and `.md`, detects changes with SHA-256, and removes deleted
-files only from that project's index. Each PDF page and Markdown heading is
-retained as a citation locator. Empty or unreadable documents appear in the index
-report; the first release does not perform OCR.
+`index PROJECT` processes the current working directory, accepts only `.pdf` and
+`.md`, and detects changes with SHA-256. It removes deleted files only from that
+directory's index, retaining data indexed from other directories in the same
+project. Each PDF page and Markdown heading is retained as a citation locator.
+Empty or unreadable documents appear in the index report; the first release does
+not perform OCR.
 
 ## Connect VS Code
 
@@ -168,4 +180,12 @@ To try the plugin from an unpublished local checkout instead, run `copilot --plu
 .venv/bin/python -m pytest -q
 ```
 
-The real-document evaluation questions and results are git-ignored because they reveal private document topics. The local 22-question set stores queries, expected source paths, and page/title locators only; it does not duplicate document text. Run `local-docs-rag evaluate PROJECT` after indexing to evaluate only that project's index. By default metrics are written to `tests/evaluation/results-PROJECT.json`; `--output-path` can override the destination. Metrics include Recall@5, locator accuracy, and Chinese-query Recall@5. These are baselines, not CI thresholds. Inspect answer citations manually for evidence support; the automated tests only reject citation IDs outside retrieved evidence.
+The real-document evaluation questions and results are git-ignored because they reveal private document topics. The local 22-question set stores queries, expected source paths, and page/title locators only; it does not duplicate document text. Run `local-docs-rag evaluate PROJECT` after indexing to evaluate only that project's index. By default, evaluation reads `tests/evaluation/questions.jsonl` and writes metrics to `tests/evaluation/results-PROJECT.json`. Specify alternate files with `--questions-path` and `--output-path`:
+
+```bash
+local-docs-rag evaluate team-docs \
+  --questions-path /path/to/questions.jsonl \
+  --output-path /path/to/results.json
+```
+
+Metrics include Recall@5, locator accuracy, and Chinese-query Recall@5. These are baselines, not CI thresholds. Inspect answer citations manually for evidence support; the automated tests only reject citation IDs outside retrieved evidence.

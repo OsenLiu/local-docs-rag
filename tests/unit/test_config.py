@@ -75,7 +75,7 @@ def test_save_persists_non_secret_settings_and_can_be_loaded(tmp_path: Path) -> 
         embedding_model="embedding-model",
         embedding_dimensions=1536,
         answer_model="answer-model",
-        projects={"team-docs": Path("/tmp/team-docs")},
+        projects={"team-docs": [Path("/tmp/team-docs")]},
     )
 
     expected.save(config_path)
@@ -91,3 +91,15 @@ def test_load_rejects_invalid_project_names(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="lowercase slug"):
         Settings.load(environ={}, config_path=config_path)
+
+
+def test_load_upgrades_single_directory_project_registry(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps({"projects": {"team-docs": str(tmp_path / "docs")}}),
+        encoding="utf-8",
+    )
+
+    settings = Settings.load(environ={}, config_path=config_path)
+
+    assert settings.projects == {"team-docs": [tmp_path / "docs"]}

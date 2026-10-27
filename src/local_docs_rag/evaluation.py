@@ -1,4 +1,4 @@
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -22,18 +22,25 @@ class EvaluationMetrics:
     chinese_recall_at_5: float | None
 
 
-def _relative_source(source: str, source_root: Path) -> str:
+def _matches_source(source: str, expected_source: str, source_roots: Path | Sequence[Path]) -> bool:
     path = Path(source).resolve()
-    try:
-        return path.relative_to(source_root.resolve()).as_posix()
-    except ValueError:
-        return path.as_posix()
+    expected_path = Path(expected_source)
+    if expected_path.is_absolute():
+        return path == expected_path.resolve()
+    roots = (source_roots,) if isinstance(source_roots, Path) else source_roots
+    for source_root in roots:
+        try:
+            if path.relative_to(source_root.resolve()).as_posix() == expected_source:
+                return True
+        except ValueError:
+            continue
+    return path.as_posix() == expected_source
 
 
 def evaluate_retrieval(
     questions: Iterable[RetrievalQuestion],
     search: Callable[[str, int], list[SearchResult]],
-    source_root: Path,
+    source_roots: Path | Sequence[Path],
 ) -> EvaluationMetrics:
     question_list = list(questions)
     source_hits = 0
@@ -44,10 +51,11 @@ def evaluate_retrieval(
     for question in question_list:
         results = search(question.query, 5)
         matching_source = any(
-            _relative_source(result.chunk.source, source_root) == question.expected_source for result in results
+            _matches_source(result.chunk.source, question.expected_source, source_roots)
+            for result in results
         )
         matching_locator = any(
-            _relative_source(result.chunk.source, source_root) == question.expected_source
+            _matches_source(result.chunk.source, question.expected_source, source_roots)
             and result.chunk.locator == question.expected_locator
             for result in results
         )

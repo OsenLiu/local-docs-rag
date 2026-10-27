@@ -49,8 +49,9 @@ class Indexer:
         discovered_sources = {str(path.resolve()) for path in files}
 
         for source in existing_hashes.keys() - discovered_sources:
-            self.store.remove_document(source, project=self.project)
-            report.removed += 1
+            if Path(source).resolve().is_relative_to(self.source_dir):
+                self.store.remove_document(source, project=self.project)
+                report.removed += 1
 
         for path in files:
             source = str(path.resolve())

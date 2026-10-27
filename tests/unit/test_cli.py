@@ -7,12 +7,17 @@ from local_docs_rag.config import Settings
 from local_docs_rag.store import IndexStore
 
 
-def run_cli(config_path: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
+def run_cli(
+    config_path: Path,
+    *arguments: str,
+    cwd: Path | None = None,
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, "-m", "local_docs_rag.cli", *arguments, "--config-path", str(config_path)],
         capture_output=True,
         text=True,
         check=False,
+        cwd=cwd,
     )
 
 
@@ -31,10 +36,10 @@ def test_index_and_search_commands_share_local_index(tmp_path: Path) -> None:
         embedding_model=None,
         embedding_dimensions=None,
         answer_model=None,
-        projects={"manual": source_dir},
+        projects={"manual": []},
     ).save(config_path)
 
-    index_result = run_cli(config_path, "index", "manual")
+    index_result = run_cli(config_path, "index", "manual", cwd=source_dir)
     search_result = run_cli(config_path, "search", "manual", "trusted network")
 
     assert index_result.returncode == 0, index_result.stderr
@@ -56,14 +61,26 @@ def test_evaluate_command_writes_retrieval_metrics(tmp_path: Path) -> None:
         embedding_model=None,
         embedding_dimensions=None,
         answer_model=None,
-        projects={"manual": source_dir},
+        projects={"manual": []},
     ).save(config_path)
-    assert run_cli(config_path, "index", "manual").returncode == 0
+    assert run_cli(config_path, "index", "manual", cwd=source_dir).returncode == 0
+    second_dir = tmp_path / "second-documents"
+    second_dir.mkdir()
+    (second_dir / "supplement.md").write_text(
+        "# Supplement\n\nProject-specific beta material.\n",
+        encoding="utf-8",
+    )
+    assert run_cli(config_path, "index", "manual", cwd=second_dir).returncode == 0
 
     questions_path = tmp_path / "questions.jsonl"
     questions_path.write_text(
         json.dumps(
-            {"query": "trusted network", "expected_source": "guide.md", "expected_locator": "Network Guide", "language": "en"}
+            {
+                "query": "project-specific beta",
+                "expected_source": "supplement.md",
+                "expected_locator": "Supplement",
+                "language": "en",
+            }
         )
         + "\n",
         encoding="utf-8",
@@ -99,15 +116,34 @@ def test_project_commands_register_require_and_remove_project(tmp_path: Path) ->
         answer_model=None,
     ).save(config_path)
 
-    add_result = run_cli(config_path, "project", "add", "alpha", str(source_dir))
+    add_result = run_cli(config_path, "project", "add", "alpha")
     assert add_result.returncode == 0, add_result.stderr
     assert run_cli(config_path, "index", "unknown").returncode != 0
 
-    index_result = run_cli(config_path, "index", "alpha")
+    index_result = run_cli(config_path, "index", "alpha", cwd=source_dir)
     assert index_result.returncode == 0, index_result.stderr
-    assert [result.chunk.source for result in IndexStore(tmp_path / "index.sqlite3").search_keyword(
-        "alpha", 5, project="alpha"
-    )] == [str(source_dir / "guide.md")]
+    second_dir = tmp_path / "more-documents"
+    second_dir.mkdir()
+    (second_dir / "extra.md").write_text("# Beta\n\nBeta-only material.\n", encoding="utf-8")
+    second_index_result = run_cli(config_path, "index", "alpha", cwd=second_dir)
+    assert second_index_result.returncode == 0, second_index_result.stderr
+    store = IndexStore(tmp_path / "index.sqlite3")
+    assert [result.chunk.source for result in store.search_keyword("alpha", 5, project="alpha")] == [
+        str(source_dir / "guide.md")
+    ]
+    assert [result.chunk.source for result in store.search_keyword("beta", 5, project="alpha")] == [
+        str(second_dir / "extra.md")
+    ]
+
+    (source_dir / "guide.md").unlink()
+    refresh_result = run_cli(config_path, "index", "alpha", cwd=source_dir)
+    assert refresh_result.returncode == 0, refresh_result.stderr
+    assert store.search_keyword("alpha", 5, project="alpha") == []
+    assert store.search_keyword("beta", 5, project="alpha")
+
+    remove_dir_result = run_cli(config_path, "project", "remove-dir", "alpha", str(second_dir), "--yes")
+    assert remove_dir_result.returncode == 0, remove_dir_result.stderr
+    assert store.search_keyword("beta", 5, project="alpha") == []
 
     remove_without_confirmation = run_cli(config_path, "project", "remove", "alpha")
     assert remove_without_confirmation.returncode != 0

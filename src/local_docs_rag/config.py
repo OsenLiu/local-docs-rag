@@ -27,7 +27,7 @@ class Settings:
     embedding_model: str | None
     embedding_dimensions: int | None
     answer_model: str | None
-    projects: dict[str, Path] = field(default_factory=dict)
+    projects: dict[str, list[Path]] = field(default_factory=dict)
 
     def save(self, config_path: Path | None = None) -> None:
         path = DEFAULT_CONFIG_PATH if config_path is None else config_path.expanduser()
@@ -39,7 +39,10 @@ class Settings:
             "embedding_model": self.embedding_model,
             "embedding_dimensions": self.embedding_dimensions,
             "answer_model": self.answer_model,
-            "projects": {name: str(source_dir) for name, source_dir in self.projects.items()},
+            "projects": {
+                name: [str(source_dir) for source_dir in source_dirs]
+                for name, source_dirs in self.projects.items()
+            },
         }
         path.write_text(json.dumps(values, indent=2) + "\n", encoding="utf-8")
 
@@ -62,14 +65,15 @@ class Settings:
         raw_projects = values.get("projects", {})
         if not isinstance(raw_projects, dict):
             raise ValueError("projects setting must be an object mapping project names to source directories")
-        projects: dict[str, Path] = {}
-        for name, project_source_dir in raw_projects.items():
+        projects: dict[str, list[Path]] = {}
+        for name, raw_source_dirs in raw_projects.items():
             validate_project_name(name)
-            if not isinstance(project_source_dir, str):
-                raise ValueError(f"source directory for project {name!r} must be a string")
+            source_dirs = [raw_source_dirs] if isinstance(raw_source_dirs, str) else raw_source_dirs
+            if not isinstance(source_dirs, list) or not all(isinstance(item, str) for item in source_dirs):
+                raise ValueError(f"source directories for project {name!r} must be a list of strings")
             if name.casefold() in {existing.casefold() for existing in projects}:
                 raise ValueError(f"duplicate project name: {name}")
-            projects[name] = Path(project_source_dir).expanduser()
+            projects[name] = [Path(source_dir).expanduser() for source_dir in source_dirs]
 
         return cls(
             source_dir=Path(source_dir).expanduser(),

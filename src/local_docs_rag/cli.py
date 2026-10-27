@@ -71,17 +71,26 @@ def _create_embedding_provider(settings: Settings) -> EmbeddingProvider | None:
     return EmbeddingProvider.create(settings)
 
 
-def _load_project(config_path: Path, project: str) -> tuple[Settings, Path]:
+def _load_project(config_path: Path, project: str) -> Settings:
     validate_project_name(project)
     settings = Settings.load(config_path=config_path)
-    source_dir = settings.projects.get(project)
-    if source_dir is None:
+    if project not in settings.projects:
         raise ValueError(f"unknown project {project!r}; register it with 'local-docs-rag project add'")
-    return settings, source_dir
+    return settings
 
 
 def _index(config_path: Path, project: str) -> int:
-    settings, source_dir = _load_project(config_path, project)
+    settings = _load_project(config_path, project)
+    source_dir = Path.cwd().resolve()
+    if not source_dir.is_dir():
+        raise FileNotFoundError(f"document directory does not exist: {source_dir}")
+    projects = dict(settings.projects)
+    source_dirs = list(projects[project])
+    if source_dir not in {source.resolve() for source in source_dirs}:
+        source_dirs.append(source_dir)
+        projects[project] = source_dirs
+        settings = replace(settings, projects=projects)
+        settings.save(config_path)
     store = IndexStore(settings.database_path, settings.embedding_dimensions)
     report = Indexer(
         source_dir,
@@ -99,7 +108,7 @@ def _index(config_path: Path, project: str) -> int:
 
 
 def _search(config_path: Path, project: str, query: str, limit: int) -> int:
-    settings, _ = _load_project(config_path, project)
+    settings = _load_project(config_path, project)
     store = IndexStore(settings.database_path, settings.embedding_dimensions)
     search_service = SearchService(store, _create_embedding_provider(settings))
     results = search_service.search(query, limit, project=project)
@@ -135,13 +144,16 @@ def _evaluate(
         except (json.JSONDecodeError, KeyError, TypeError) as error:
             raise ValueError(f"invalid evaluation question on line {line_number}") from error
 
-    settings, source_dir = _load_project(config_path, project)
+    settings = _load_project(config_path, project)
+    source_dirs = settings.projects[project]
+    if not source_dirs:
+        raise ValueError(f"project {project!r} has no indexed source directories")
     store = IndexStore(settings.database_path, settings.embedding_dimensions)
     search_service = SearchService(store, _create_embedding_provider(settings))
     metrics = evaluate_retrieval(
         questions,
         lambda query, limit: search_service.search(query, limit, project=project),
-        source_dir,
+        source_dirs,
     )
     serialized_metrics = json.dumps(asdict(metrics), indent=2) + "\n"
     if output_path is None:
@@ -153,7 +165,7 @@ def _evaluate(
 
 
 def _ask(config_path: Path, project: str, query: str, limit: int) -> int:
-    settings, _ = _load_project(config_path, project)
+    settings = _load_project(config_path, project)
     store = IndexStore(settings.database_path, settings.embedding_dimensions)
     search_service = SearchService(store, _create_embedding_provider(settings))
     answer_provider = AnswerProvider.create(settings)
@@ -171,28 +183,22 @@ def _mcp_serve(config_path: Path) -> int:
     return 0
 
 
-def _project_add(config_path: Path, name: str, source_dir: Path, adopt_existing: bool) -> int:
+def _project_add(config_path: Path, name: str, adopt_existing: bool) -> int:
     validate_project_name(name)
     settings = Settings.load(config_path=config_path)
     if name in settings.projects:
         raise ValueError(f"project {name!r} is already registered")
-    resolved_source_dir = source_dir.expanduser().resolve()
-    if not resolved_source_dir.is_dir():
-        raise FileNotFoundError(f"project source directory does not exist: {resolved_source_dir}")
+    source_dirs: list[Path] = []
     if adopt_existing:
-        if resolved_source_dir != settings.source_dir.expanduser().resolve():
-            raise ValueError(
-                "--adopt-existing requires SOURCE_DIR to match the configured legacy source_dir "
-                f"({settings.source_dir.expanduser().resolve()})"
-            )
         if not settings.database_path.expanduser().is_file():
             raise ValueError("there is no existing index database to adopt")
         store = IndexStore(settings.database_path, settings.embedding_dimensions)
         store.adopt_legacy_documents(name)
+        source_dirs.append(settings.source_dir.expanduser().resolve())
     projects = dict(settings.projects)
-    projects[name] = resolved_source_dir
+    projects[name] = source_dirs
     replace(settings, projects=projects).save(config_path)
-    print(f"Project registered: {name} -> {resolved_source_dir}")
+    print(f"Project registered: {name}")
     return 0
 
 
@@ -201,8 +207,10 @@ def _project_list(config_path: Path) -> int:
     if not settings.projects:
         print("No projects registered.")
         return 0
-    for name, source_dir in sorted(settings.projects.items()):
-        print(f"{name}\t{source_dir}")
+    for name, source_dirs in sorted(settings.projects.items()):
+        print(name)
+        for source_dir in source_dirs:
+            print(f"  {source_dir}")
     return 0
 
 
@@ -228,6 +236,39 @@ def _project_remove(config_path: Path, name: str, assume_yes: bool) -> int:
     return 0
 
 
+def _project_remove_dir(config_path: Path, name: str, source_dir: Path, assume_yes: bool) -> int:
+    validate_project_name(name)
+    settings = Settings.load(config_path=config_path)
+    if name not in settings.projects:
+        raise ValueError(f"unknown project {name!r}")
+    root = source_dir.expanduser().resolve()
+    source_dirs = [source.resolve() for source in settings.projects[name]]
+    if root not in source_dirs:
+        raise ValueError(f"source directory {root} is not registered for project {name!r}")
+    if not assume_yes:
+        if not sys.stdin.isatty():
+            raise ValueError("directory removal requires confirmation; pass --yes in non-interactive mode")
+        confirmation = input(
+            f"Remove {root} and its indexed data from project {name!r}? [y/N] "
+        )
+        if confirmation.strip().casefold() not in {"y", "yes"}:
+            print("Source directory removal cancelled.")
+            return 0
+    database_path = settings.database_path.expanduser()
+    remaining_roots = [source for source in source_dirs if source != root]
+    if database_path.is_file():
+        IndexStore(database_path, settings.embedding_dimensions).remove_project_source_root(
+            name,
+            root,
+            remaining_roots,
+        )
+    projects = dict(settings.projects)
+    projects[name] = remaining_roots
+    replace(settings, projects=projects).save(config_path)
+    print(f"Source directory removed from project {name}: {root}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="local-docs-rag")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -244,16 +285,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     project_parser = commands.add_parser("project", help="manage indexed document projects")
     project_commands = project_parser.add_subparsers(dest="project_command", required=True)
-    project_add_parser = project_commands.add_parser("add", help="register a document project")
+    project_add_parser = project_commands.add_parser("add", help="register a project without a source directory")
     project_add_parser.add_argument("name")
-    project_add_parser.add_argument("source_dir", type=Path)
     project_add_parser.add_argument("--adopt-existing", action="store_true")
     project_add_parser.add_argument("--config-path", type=Path, default=DEFAULT_CONFIG_PATH)
     project_add_parser.set_defaults(
         handler=lambda args: _project_add(
             args.config_path,
             args.name,
-            args.source_dir,
             args.adopt_existing,
         )
     )
@@ -270,7 +309,24 @@ def build_parser() -> argparse.ArgumentParser:
         handler=lambda args: _project_remove(args.config_path, args.name, args.yes)
     )
 
-    index_parser = commands.add_parser("index", help="index PDF and Markdown files")
+    project_remove_dir_parser = project_commands.add_parser(
+        "remove-dir",
+        help="remove one source directory and its indexed data from a project",
+    )
+    project_remove_dir_parser.add_argument("name")
+    project_remove_dir_parser.add_argument("source_dir", type=Path)
+    project_remove_dir_parser.add_argument("--yes", action="store_true", help="confirm removal without prompting")
+    project_remove_dir_parser.add_argument("--config-path", type=Path, default=DEFAULT_CONFIG_PATH)
+    project_remove_dir_parser.set_defaults(
+        handler=lambda args: _project_remove_dir(
+            args.config_path,
+            args.name,
+            args.source_dir,
+            args.yes,
+        )
+    )
+
+    index_parser = commands.add_parser("index", help="index PDF and Markdown files in the current directory")
     index_parser.add_argument("project")
     index_parser.add_argument("--config-path", type=Path, default=DEFAULT_CONFIG_PATH)
     index_parser.set_defaults(handler=lambda args: _index(args.config_path, args.project))
